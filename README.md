@@ -6,6 +6,17 @@ Watch AI agents walk to desks, think, collaborate, hire interns, assign tasks to
 
 > **Zero lock-in.** Runs 100% locally with Ollama. Swap for any OpenAI-compatible API.
 
+
+[https://youtu.be/GgrK8K9RlIA](https://youtu.be/GgrK8K9RlIA)
+
+<img width="1697" height="1272" alt="Screenshot at Feb 25 00-15-59" src="https://github.com/user-attachments/assets/9ed16692-09d9-44e4-a258-f796f9479afb" />
+<img width="1694" height="1272" alt="Screenshot at Feb 25 00-16-31" src="https://github.com/user-attachments/assets/f592359a-ba96-45fc-bb5e-07ec88583a10" />
+<img width="1699" height="1278" alt="screencapture-localhost-5173-2026-02-25-00_05_15" src="https://github.com/user-attachments/assets/4a604b86-1aaf-4b0d-985b-51afe7d71586" />
+<img width="1699" height="1278" alt="screencapture-localhost-5173-2026-02-25-00_04_54" src="https://github.com/user-attachments/assets/4f2811ff-a66e-47e3-9d0f-184123e75e01" />
+<img width="1699" height="1278" alt="screencapture-localhost-5173-2026-02-25-00_04_44" src="https://github.com/user-attachments/assets/8773814e-9414-4c62-a098-8f5a205db187" />
+<img width="1695" height="1270" alt="Screenshot at Feb 25 00-18-57" src="https://github.com/user-attachments/assets/1591cb0e-9aea-4728-8f01-9f7a2c8d5ac2" />
+<img width="2018" height="1268" alt="Screenshot at Feb 25 00-34-36" src="https://github.com/user-attachments/assets/f719ad99-f4ba-4998-8c9b-68818061bc60" />
+
 ---
 
 ## ✨ What Can It Do?
@@ -253,12 +264,8 @@ npm test --workspace=@agent-office/adapters # Adapters only
 
 ---
 
-## 📄 License
-
-MIT — use it however you want.
-
----
-
 **Built with** Phaser.js · Colyseus · React · Ollama · SQLite · TypeScript
 
 **Star ⭐ this repo** if you think AI agents deserve their own office!
+
+💙 Shout out to @pablodelucca for building and inspiring this project with [https://github.com/pablodelucca/pixel-agents](https://github.com/pablodelucca/pixel-agents)
