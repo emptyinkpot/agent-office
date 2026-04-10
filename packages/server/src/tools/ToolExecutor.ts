@@ -8,6 +8,17 @@ export interface ToolResult {
 }
 
 export class ToolExecutor {
+    private tavilyClient: ReturnType<typeof tavily> | null = null;
+
+    private getTavilyClient(): ReturnType<typeof tavily> | null {
+        if (this.tavilyClient) return this.tavilyClient;
+        const apiKey = process.env.TAVILY_API_KEY;
+        if (apiKey) {
+            this.tavilyClient = tavily({ apiKey });
+            return this.tavilyClient;
+        }
+        return null;
+    }
 
     async execute(toolName: string, params: any): Promise<ToolResult> {
         switch (toolName) {
@@ -57,16 +68,15 @@ export class ToolExecutor {
     }
 
     private async webSearch(query: string): Promise<ToolResult> {
-        const tavilyApiKey = process.env.TAVILY_API_KEY;
-        if (tavilyApiKey) {
-            return this.webSearchTavily(query, tavilyApiKey);
+        const client = this.getTavilyClient();
+        if (client) {
+            return this.webSearchTavily(query, client);
         }
         return this.webSearchDuckDuckGo(query);
     }
 
-    private async webSearchTavily(query: string, apiKey: string): Promise<ToolResult> {
+    private async webSearchTavily(query: string, client: ReturnType<typeof tavily>): Promise<ToolResult> {
         try {
-            const client = tavily({ apiKey });
             const response = await client.search(query, { maxResults: 5 });
 
             const results = (response.results || [])
