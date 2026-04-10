@@ -1,5 +1,5 @@
 import { exec } from 'child_process';
-import { tavily } from '@tavily/core';
+import { tavily, type TavilyClient, type TavilySearchResponse } from '@tavily/core';
 
 export interface ToolResult {
     success: boolean;
@@ -8,9 +8,9 @@ export interface ToolResult {
 }
 
 export class ToolExecutor {
-    private tavilyClient: ReturnType<typeof tavily> | null = null;
+    private tavilyClient: TavilyClient | null = null;
 
-    private getTavilyClient(): ReturnType<typeof tavily> | null {
+    private getTavilyClient(): TavilyClient | null {
         if (this.tavilyClient) return this.tavilyClient;
         const apiKey = process.env.TAVILY_API_KEY;
         if (apiKey) {
@@ -75,12 +75,12 @@ export class ToolExecutor {
         return this.webSearchDuckDuckGo(query);
     }
 
-    private async webSearchTavily(query: string, client: ReturnType<typeof tavily>): Promise<ToolResult> {
+    private async webSearchTavily(query: string, client: TavilyClient): Promise<ToolResult> {
         try {
             const response = await client.search(query, { maxResults: 5 });
 
             const results = (response.results || [])
-                .map((r: any) => `${r.title}: ${r.content}`)
+                .map((r: TavilySearchResponse['results'][number]) => `${r.title}: ${r.content}`)
                 .join('\n\n');
 
             const output = results
