@@ -1,4 +1,5 @@
 import { exec } from 'child_process';
+import { tavily } from '@tavily/core';
 
 export interface ToolResult {
     success: boolean;
@@ -56,6 +57,33 @@ export class ToolExecutor {
     }
 
     private async webSearch(query: string): Promise<ToolResult> {
+        const tavilyApiKey = process.env.TAVILY_API_KEY;
+        if (tavilyApiKey) {
+            return this.webSearchTavily(query, tavilyApiKey);
+        }
+        return this.webSearchDuckDuckGo(query);
+    }
+
+    private async webSearchTavily(query: string, apiKey: string): Promise<ToolResult> {
+        try {
+            const client = tavily({ apiKey });
+            const response = await client.search(query, { maxResults: 5 });
+
+            const results = (response.results || [])
+                .map((r: any) => `${r.title}: ${r.content}`)
+                .join('\n\n');
+
+            const output = results
+                ? `Results:\n${results}`
+                : `No results for "${query}".`;
+
+            return { success: true, output };
+        } catch (e: any) {
+            return { success: false, output: '', error: `Tavily search failed: ${e.message}` };
+        }
+    }
+
+    private async webSearchDuckDuckGo(query: string): Promise<ToolResult> {
         try {
             // Use a simple fetch to DuckDuckGo Instant Answer API (no API key needed)
             const encoded = encodeURIComponent(query);
