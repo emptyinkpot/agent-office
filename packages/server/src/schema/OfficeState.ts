@@ -9,6 +9,10 @@ export class AgentState extends Schema {
     @type('string') action: string;
     @type('string') currentTask: string;
     @type('string') thought: string;
+    @type('number') mood: number;
+    @type('number') reputation: number;
+    @type('number') riskLevel: number;
+    @type('number') momentum: number;
 
     constructor(id: string, name: string) {
         super();
@@ -20,6 +24,10 @@ export class AgentState extends Schema {
         this.action = 'idle';
         this.currentTask = '';
         this.thought = '';
+        this.mood = 0.6;
+        this.reputation = 0.5;
+        this.riskLevel = 0.2;
+        this.momentum = 0.4;
     }
 }
 

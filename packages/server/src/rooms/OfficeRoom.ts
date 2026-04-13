@@ -5,7 +5,26 @@ import { OllamaAdapter } from '@agent-office/adapters';
 import { ToolExecutor } from '../tools/ToolExecutor';
 import { MemoryStore } from '../memory/MemoryStore';
 
+interface HighlightEvent {
+    type: string;
+    title: string;
+    body: string;
+    agentId?: string | null;
+    scenario: string;
+    time: string;
+}
+
+interface RelationshipEdge {
+    a: string;
+    b: string;
+    score: number;
+    status: 'alliance' | 'neutral' | 'rivalry';
+    updatedAt: string;
+}
+
 export class OfficeRoom extends Room<OfficeState> {
+    private static activeRoom: OfficeRoom | null = null;
+
     maxClients = 100;
     private office!: Office;
     private demoTickCount = 0;
@@ -16,6 +35,12 @@ export class OfficeRoom extends Room<OfficeState> {
     private toolExecutor = new ToolExecutor();
     private memoryStore = new MemoryStore();
     private sessionId = `session_${Date.now()}`;
+    private currentScenario = 'Free Play';
+    private highlights: HighlightEvent[] = [];
+    private chaosHistory: Array<{ event: string; label: string; time: string }> = [];
+    private relationships: Map<string, RelationshipEdge> = new Map();
+    private audienceVotes: Record<string, number> = {};
+    private currentLayout: any[] = [];
 
     // Furniture interaction points: named locations agents can walk to
     private furnitureTargets: Record<string, { x: number; y: number; type: string }> = {
@@ -35,7 +60,12 @@ export class OfficeRoom extends Room<OfficeState> {
         'hire_4-desk': { x: 32, y: 18, type: 'desk' },
     };
 
+    static getActiveRoom(): OfficeRoom | null {
+        return OfficeRoom.activeRoom;
+    }
+
     async onCreate(options: any) {
+        OfficeRoom.activeRoom = this;
         this.setState(new OfficeState());
 
         // Initialize memory store
@@ -96,6 +126,9 @@ export class OfficeRoom extends Room<OfficeState> {
 
         await setupCoreAgent('alice', 'Alice', 'Engineer', 10, 10);
         await setupCoreAgent('bob', 'Bob', 'Product Manager', 20, 15);
+        this.rebuildRelationshipGraph();
+        const savedLayout = await this.memoryStore.loadLayout('default');
+        this.currentLayout = Array.isArray(savedLayout) ? savedLayout : [];
 
         // ─── MESSAGE HANDLERS ───
 
@@ -106,6 +139,17 @@ export class OfficeRoom extends Room<OfficeState> {
         this.onMessage('chat', (client, message) => {
             console.log(`Chat from ${client.sessionId}: ${message.text}`);
             this.broadcast('chat', { sender: 'User', text: message.text });
+        });
+
+        this.onMessage('start-scenario', (client, message) => {
+            const scenarioName = String(message?.scenario || 'Free Play');
+            this.currentScenario = scenarioName;
+            this.applyScenarioKickoff(scenarioName);
+        });
+
+        this.onMessage('trigger-chaos', (client, message) => {
+            const eventName = String(message?.event || 'minor_outage');
+            this.applyChaosEvent(eventName);
         });
 
         // UI-driven task assignment
@@ -142,7 +186,11 @@ export class OfficeRoom extends Room<OfficeState> {
 
         // Save office layout from editor
         this.onMessage('save-layout', async (client, message) => {
-            await this.memoryStore.saveLayout(message.name || 'default', JSON.stringify(message.layout));
+            const layoutName = message.name || 'default';
+            const layout = Array.isArray(message.layout) ? message.layout : [];
+            await this.memoryStore.saveLayout(layoutName, JSON.stringify(layout));
+            this.currentLayout = layout;
+            this.broadcast('layout-sync', { name: layoutName, layout: this.currentLayout });
             this.broadcast('chat', { sender: 'System', text: '✅ Office layout saved!' });
         });
 
@@ -221,6 +269,13 @@ export class OfficeRoom extends Room<OfficeState> {
                                 sender: coreAgent.config.name,
                                 text: `💬 (to ${targetAgent.config.name}): ${decision.message}`
                             });
+                            this.emitHighlight(
+                                'conversation',
+                                `${coreAgent.config.name} pinged ${targetAgent.config.name}`,
+                                decision.message.slice(0, 120),
+                                id
+                            );
+                            this.updateRelationship(id, targetId, 0.08);
 
                             // Save conversation memory
                             await this.memoryStore.saveMemory(id, {
@@ -258,6 +313,12 @@ export class OfficeRoom extends Room<OfficeState> {
                                     task: title,
                                     status: 'in_progress'
                                 });
+                                this.emitHighlight(
+                                    'task',
+                                    `${coreAgent.config.name} assigned work`,
+                                    `"${title}" is now owned by ${targetAgent.config.name}.`,
+                                    targetId
+                                );
                             }
                         } else if (decision.toolCall.name === 'hire_agent') {
                             // ─── DYNAMIC AGENT HIRING ───
@@ -303,11 +364,18 @@ export class OfficeRoom extends Room<OfficeState> {
                                 this.thinkingLocks.set(hireId, false);
 
                                 this.hireCount++;
+                                this.rebuildRelationshipGraph();
 
                                 this.broadcast('chat', {
                                     sender: '🏢 Office',
                                     text: `🎉 ${coreAgent.config.name} hired ${hireName} as ${hireRole}! Welcome to the team!`
                                 });
+                                this.emitHighlight(
+                                    'hiring',
+                                    `${hireName} joined the team`,
+                                    `${coreAgent.config.name} hired ${hireName} (${hireRole}).`,
+                                    hireId
+                                );
 
                                 // Give the hiring agent a memory of the hire
                                 coreAgent.addMemory({
@@ -332,6 +400,12 @@ export class OfficeRoom extends Room<OfficeState> {
                                 sender: coreAgent.config.name,
                                 text: `🔧 Used tool [${decision.toolCall.name}]: ${result.success ? result.output.slice(0, 100) : result.error}`
                             });
+                            this.emitHighlight(
+                                'tool',
+                                `${coreAgent.config.name} used ${decision.toolCall.name}`,
+                                (result.success ? result.output : result.error || 'Tool failed').slice(0, 120),
+                                id
+                            );
 
                             coreAgent.addMemory({
                                 content: `Tool ${decision.toolCall.name} result: ${result.output.slice(0, 200)}`,
@@ -399,8 +473,272 @@ export class OfficeRoom extends Room<OfficeState> {
                 else if (agent.y < target.y) agent.y += 1;
                 else if (agent.y > target.y) agent.y -= 1;
                 clamp(agent);
+
+                // Keep viral telemetry alive for UI overlays and highlights.
+                this.updateAgentViralMetrics(key, agent.action);
             });
         }
+    }
+
+    private clamp01(value: number): number {
+        return Math.max(0, Math.min(1, value));
+    }
+
+    private emitHighlight(type: string, title: string, body: string, agentId?: string) {
+        const payload: HighlightEvent = {
+            type,
+            title,
+            body,
+            agentId: agentId || null,
+            scenario: this.currentScenario,
+            time: this.state.officeTime
+        };
+        this.highlights = [payload, ...this.highlights].slice(0, 200);
+        this.broadcast('highlight-event', payload);
+    }
+
+    private updateAgentViralMetrics(agentId: string, action: string) {
+        const state = this.state.agents.get(agentId);
+        if (!state) return;
+        const jitter = (Math.random() - 0.5) * 0.03;
+        const actionBoost =
+            action === 'work' ? 0.015 :
+                action === 'talk' ? 0.02 :
+                    action === 'use_tool' ? 0.03 :
+                        -0.005;
+
+        state.momentum = this.clamp01(state.momentum + actionBoost + jitter);
+        state.riskLevel = this.clamp01(state.riskLevel + (action === 'use_tool' ? 0.02 : -0.004) + jitter);
+        state.mood = this.clamp01(state.mood + (action === 'talk' ? 0.02 : -0.002) + jitter);
+        state.reputation = this.clamp01(state.reputation + (action === 'work' ? 0.015 : 0.001) + jitter / 2);
+    }
+
+    private applyScenarioKickoff(scenarioName: string) {
+        this.broadcast('scenario-event', {
+            type: 'scenario-started',
+            scenario: scenarioName,
+            time: this.state.officeTime
+        });
+
+        this.broadcast('chat', {
+            sender: '🎬 Producer',
+            text: `Scenario loaded: ${scenarioName}. Let the office drama begin.`
+        });
+
+        this.emitHighlight(
+            'scenario',
+            `Scenario: ${scenarioName}`,
+            `The office switched into ${scenarioName} mode.`,
+        );
+
+        this.state.agents.forEach((agent, id) => {
+            agent.momentum = this.clamp01(agent.momentum + 0.15);
+            agent.riskLevel = this.clamp01(agent.riskLevel + 0.1);
+            if (Math.random() < 0.4) {
+                this.emitHighlight(
+                    'character_arc',
+                    `${agent.name} steps up`,
+                    `${agent.name} is pushing hard as ${scenarioName} starts.`,
+                    id
+                );
+            }
+        });
+    }
+
+    private applyChaosEvent(eventName: string) {
+        const chaosMap: Record<string, { label: string; moodDelta: number; riskDelta: number; momentumDelta: number }> = {
+            server_outage: { label: 'Server Outage', moodDelta: -0.25, riskDelta: 0.35, momentumDelta: 0.1 },
+            funding_cut: { label: 'Funding Cut', moodDelta: -0.2, riskDelta: 0.28, momentumDelta: -0.05 },
+            surprise_launch: { label: 'Surprise Launch', moodDelta: 0.12, riskDelta: 0.22, momentumDelta: 0.25 },
+            client_escalation: { label: 'Client Escalation', moodDelta: -0.1, riskDelta: 0.3, momentumDelta: 0.08 },
+            viral_tweet: { label: 'Viral Tweet', moodDelta: 0.25, riskDelta: 0.12, momentumDelta: 0.3 }
+        };
+
+        const selected = chaosMap[eventName] || chaosMap.server_outage;
+        this.chaosHistory = [
+            { event: eventName, label: selected.label, time: this.state.officeTime },
+            ...this.chaosHistory
+        ].slice(0, 100);
+        this.broadcast('scenario-event', {
+            type: 'chaos-triggered',
+            event: eventName,
+            label: selected.label,
+            time: this.state.officeTime
+        });
+
+        this.broadcast('chat', {
+            sender: '⚠️ Chaos Engine',
+            text: `${selected.label} hit the office. Everyone reacts in real-time.`
+        });
+
+        this.emitHighlight(
+            'chaos',
+            selected.label,
+            `Chaos event "${selected.label}" changed team mood and risk levels.`
+        );
+
+        this.state.agents.forEach((agent, id) => {
+            agent.mood = this.clamp01(agent.mood + selected.moodDelta + (Math.random() - 0.5) * 0.08);
+            agent.riskLevel = this.clamp01(agent.riskLevel + selected.riskDelta + Math.random() * 0.08);
+            agent.momentum = this.clamp01(agent.momentum + selected.momentumDelta + (Math.random() - 0.5) * 0.05);
+            if (agent.riskLevel > 0.75) {
+                this.emitHighlight(
+                    'high_risk',
+                    `${agent.name} is under pressure`,
+                    `${agent.name}'s risk level spiked after ${selected.label}.`,
+                    id
+                );
+            }
+        });
+
+        // Chaos can create alliances or rivalries.
+        const ids = Array.from(this.state.agents.keys());
+        for (let i = 0; i < ids.length; i++) {
+            for (let j = i + 1; j < ids.length; j++) {
+                const delta = (Math.random() - 0.5) * 0.35;
+                this.updateRelationship(ids[i], ids[j], delta);
+            }
+        }
+    }
+
+    private relationshipKey(a: string, b: string): string {
+        return [a, b].sort().join('::');
+    }
+
+    private statusFromScore(score: number): RelationshipEdge['status'] {
+        if (score > 0.35) return 'alliance';
+        if (score < -0.35) return 'rivalry';
+        return 'neutral';
+    }
+
+    private rebuildRelationshipGraph() {
+        const ids = Array.from(this.state.agents.keys());
+        for (let i = 0; i < ids.length; i++) {
+            for (let j = i + 1; j < ids.length; j++) {
+                const key = this.relationshipKey(ids[i], ids[j]);
+                if (!this.relationships.has(key)) {
+                    this.relationships.set(key, {
+                        a: ids[i],
+                        b: ids[j],
+                        score: 0,
+                        status: 'neutral',
+                        updatedAt: this.state.officeTime
+                    });
+                }
+            }
+        }
+        this.emitRelationshipGraph();
+    }
+
+    private updateRelationship(a: string, b: string, delta: number) {
+        const key = this.relationshipKey(a, b);
+        const existing = this.relationships.get(key) || {
+            a: [a, b].sort()[0],
+            b: [a, b].sort()[1],
+            score: 0,
+            status: 'neutral' as const,
+            updatedAt: this.state.officeTime
+        };
+        const score = Math.max(-1, Math.min(1, existing.score + delta));
+        const updated: RelationshipEdge = {
+            ...existing,
+            score,
+            status: this.statusFromScore(score),
+            updatedAt: this.state.officeTime
+        };
+        this.relationships.set(key, updated);
+        this.emitRelationshipGraph();
+    }
+
+    private emitRelationshipGraph() {
+        this.broadcast('relationship-update', this.buildRelationshipPayload());
+    }
+
+    private buildRelationshipPayload() {
+        const idToName: Record<string, string> = {};
+        this.state.agents.forEach((agent, id) => {
+            idToName[id] = agent.name;
+        });
+        return {
+            edges: Array.from(this.relationships.values()).map((edge) => ({
+                ...edge,
+                aName: idToName[edge.a] || edge.a,
+                bName: idToName[edge.b] || edge.b
+            })),
+            time: this.state.officeTime
+        };
+    }
+
+    public registerAudienceVote(eventName: string, voterId?: string) {
+        const normalized = String(eventName || 'server_outage');
+        this.audienceVotes[normalized] = (this.audienceVotes[normalized] || 0) + 1;
+        const totalVotes = Object.values(this.audienceVotes).reduce((sum, value) => sum + value, 0);
+        const shouldTrigger = this.audienceVotes[normalized] >= 3 || totalVotes % 5 === 0;
+
+        if (shouldTrigger) {
+            this.applyChaosEvent(normalized);
+            this.emitHighlight(
+                'audience_vote',
+                `Audience triggered ${normalized}`,
+                `Viewers forced a ${normalized} chaos event.`
+            );
+            this.audienceVotes[normalized] = 0;
+        }
+
+        return {
+            accepted: true,
+            event: normalized,
+            voterId: voterId || null,
+            tally: this.audienceVotes[normalized] || 0,
+            triggered: shouldTrigger
+        };
+    }
+
+    public getEpisodeRecap() {
+        const topHighlights = [...this.highlights].slice(0, 10);
+        const leaderboard = Array.from(this.state.agents.entries()).map(([id, agent]) => {
+            const impact = (
+                agent.momentum * 0.35 +
+                agent.reputation * 0.3 +
+                agent.mood * 0.2 +
+                (1 - agent.riskLevel) * 0.15
+            );
+            return {
+                id,
+                name: agent.name,
+                action: agent.action,
+                mood: agent.mood,
+                reputation: agent.reputation,
+                riskLevel: agent.riskLevel,
+                momentum: agent.momentum,
+                impact: Number(impact.toFixed(3))
+            };
+        }).sort((a, b) => b.impact - a.impact);
+
+        const avgMomentum = leaderboard.length
+            ? leaderboard.reduce((sum, item) => sum + item.momentum, 0) / leaderboard.length
+            : 0;
+        const avgRisk = leaderboard.length
+            ? leaderboard.reduce((sum, item) => sum + item.riskLevel, 0) / leaderboard.length
+            : 0;
+        const outcome = avgMomentum > 0.65 && avgRisk < 0.5
+            ? 'Launch trajectory: team executed under pressure and came out stronger.'
+            : avgRisk > 0.65
+                ? 'High volatility: chaos dominated this episode.'
+                : 'Mixed outcome: strong moments with unresolved tensions.';
+
+        return {
+            generatedAt: this.state.officeTime,
+            scenario: this.currentScenario,
+            topHighlights,
+            leaderboard: leaderboard.slice(0, 10),
+            outcomeCard: {
+                title: `${this.currentScenario} Outcome`,
+                summary: outcome,
+                chaosEvents: this.chaosHistory.slice(0, 10),
+                activeRelationships: Array.from(this.relationships.values()).filter((edge) => edge.status !== 'neutral').length
+            }
+        };
     }
 
     onJoin(client: Client, options: any) {
@@ -409,6 +747,8 @@ export class OfficeRoom extends Room<OfficeState> {
         this.memoryStore.getTasks().then(tasks => {
             client.send('tasks-sync', tasks);
         });
+        client.send('relationship-update', this.buildRelationshipPayload());
+        client.send('layout-sync', { name: 'default', layout: this.currentLayout });
     }
 
     onLeave(client: Client, consented: boolean) {
@@ -417,6 +757,7 @@ export class OfficeRoom extends Room<OfficeState> {
 
     async onDispose() {
         console.log("room", this.roomId, "disposing... saving memories");
+        OfficeRoom.activeRoom = null;
         // Persist all agent memories on shutdown
         for (const [id, agent] of this.coreAgents) {
             await this.memoryStore.saveMemories(id, agent.memories, this.sessionId);

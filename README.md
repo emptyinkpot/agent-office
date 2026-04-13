@@ -254,6 +254,12 @@ npm test --workspace=@agent-office/adapters # Adapters only
 
 ---
 
+## 📘 Changelog
+
+See release notes in [CHANGELOG.md](./CHANGELOG.md).
+
+---
+
 ## 🤝 Contributing
 
 1. Fork the repo

@@ -12,6 +12,26 @@ app.get('/api/offices', (req, res) => {
     res.json({ status: 'ok', offices: [] });
 });
 
+app.post('/api/vote-chaos', (req, res) => {
+    const room = OfficeRoom.getActiveRoom();
+    if (!room) {
+        res.status(503).json({ ok: false, error: 'No active office room.' });
+        return;
+    }
+    const { event, voterId } = req.body || {};
+    const result = room.registerAudienceVote(event || 'server_outage', voterId);
+    res.json({ ok: true, ...result });
+});
+
+app.get('/api/episode-recap', (req, res) => {
+    const room = OfficeRoom.getActiveRoom();
+    if (!room) {
+        res.status(503).json({ ok: false, error: 'No active office room.' });
+        return;
+    }
+    res.json({ ok: true, recap: room.getEpisodeRecap() });
+});
+
 // Create HTTP and Colyseus server
 const httpServer = createServer(app);
 const colyseusServer = new Server({
