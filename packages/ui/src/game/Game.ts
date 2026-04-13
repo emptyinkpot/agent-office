@@ -9,12 +9,41 @@ export function getColyseusRoom() {
     return activeRoom;
 }
 
+function resolveWsEndpoint(): string {
+    if (typeof window !== 'undefined') {
+        const queryWs = new URLSearchParams(window.location.search).get('ws');
+        if (queryWs && queryWs.trim()) {
+            window.localStorage.setItem('agent-office:ws-url', queryWs.trim());
+            return queryWs.trim();
+        }
+        const savedWs = window.localStorage.getItem('agent-office:ws-url');
+        if (savedWs && savedWs.trim()) return savedWs.trim();
+    }
+    const globalEndpoint = typeof window !== 'undefined'
+        ? (window as any).__AGENT_OFFICE_WS_URL as string | undefined
+        : undefined;
+    if (globalEndpoint && globalEndpoint.trim()) return globalEndpoint.trim();
+    if (typeof window !== 'undefined') {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${protocol}//${window.location.hostname}:3000`;
+    }
+    return 'ws://localhost:3000';
+}
+
 export class OfficeScene extends Phaser.Scene {
     private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
     private room?: Colyseus.Room;
     private agentSprites: Map<string, Phaser.GameObjects.Container> = new Map();
     private statusText!: Phaser.GameObjects.Text;
     private followTarget: Phaser.GameObjects.Container | null = null;
+    private cinematicMode = true;
+    private cinematicReleaseAt = 0;
+    private customLayoutLayer?: Phaser.GameObjects.Container;
+    private layoutItems: Array<{ id: string; type: string; x: number; y: number; label?: string }> = [];
+    private layoutEditMode = false;
+    private layoutDragItemId: string | null = null;
+    private gridSize = 40 * 16;
+    private heldMoveKeys: Set<'left' | 'right' | 'up' | 'down'> = new Set();
 
     constructor() {
         super('OfficeScene');
@@ -58,7 +87,7 @@ export class OfficeScene extends Phaser.Scene {
 
             console.log("Animations created: ", hasAnims);
 
-            const gridSize = 40 * 16;
+            const gridSize = this.gridSize;
             const g = this.add.graphics();
 
             // ═══════════════════════════════════════════
@@ -385,10 +414,86 @@ export class OfficeScene extends Phaser.Scene {
             this.cameras.main.setBackgroundColor('#16213e');
             this.cameras.main.setZoom(2);
             this.cameras.main.centerOn(gridSize / 2, gridSize / 2);
+            this.cameras.main.setBounds(0, 0, gridSize, gridSize);
+            this.customLayoutLayer = this.add.container(0, 0);
+            this.customLayoutLayer.setDepth(4);
 
             if (this.input.keyboard) {
                 this.cursors = this.input.keyboard.createCursorKeys();
             }
+
+            eventBus.addEventListener('cinematic-toggle', (e: Event) => {
+                const detail = (e as CustomEvent).detail as { enabled: boolean };
+                this.cinematicMode = Boolean(detail?.enabled);
+                if (!this.cinematicMode) {
+                    this.cinematicReleaseAt = 0;
+                }
+            });
+            eventBus.addEventListener('layout-preview-update', (e: Event) => {
+                const detail = (e as CustomEvent).detail as { items: Array<{ id: string; type: string; x: number; y: number; label?: string }> };
+                this.layoutItems = Array.isArray(detail?.items) ? detail.items : [];
+                this.renderCustomLayout(this.layoutItems);
+            });
+            eventBus.addEventListener('layout-edit-mode', (e: Event) => {
+                const detail = (e as CustomEvent).detail as { enabled: boolean };
+                this.layoutEditMode = Boolean(detail?.enabled);
+                if (!this.layoutEditMode) this.layoutDragItemId = null;
+            });
+
+            this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+                if (!this.layoutEditMode || !this.layoutDragItemId || !pointer.isDown) return;
+                const gx = Phaser.Math.Clamp(Math.round(pointer.worldX / 16), 2, 36);
+                const gy = Phaser.Math.Clamp(Math.round(pointer.worldY / 16), 2, 36);
+                this.layoutItems = this.layoutItems.map((item) =>
+                    item.id === this.layoutDragItemId ? { ...item, x: gx, y: gy } : item
+                );
+                this.renderCustomLayout(this.layoutItems);
+                eventBus.dispatchEvent(new CustomEvent('layout-item-moved', { detail: { items: this.layoutItems } }));
+            });
+            this.input.on('pointerup', () => {
+                this.layoutDragItemId = null;
+            });
+            this.input.on('wheel', (_pointer: Phaser.Input.Pointer, _objects: Phaser.GameObjects.GameObject[], _deltaX: number, deltaY: number) => {
+                const nextZoom = Phaser.Math.Clamp(this.cameras.main.zoom - deltaY * 0.001, 1, 3);
+                this.cameras.main.setZoom(nextZoom);
+            });
+
+            const toMoveDirection = (event: KeyboardEvent): 'left' | 'right' | 'up' | 'down' | null => {
+                const key = (event.key || '').toLowerCase();
+                const code = (event.code || '').toLowerCase();
+                if (key === 'arrowleft' || key === 'a' || code === 'arrowleft' || code === 'keya') return 'left';
+                if (key === 'arrowright' || key === 'd' || code === 'arrowright' || code === 'keyd') return 'right';
+                if (key === 'arrowup' || key === 'w' || code === 'arrowup' || code === 'keyw') return 'up';
+                if (key === 'arrowdown' || key === 's' || code === 'arrowdown' || code === 'keys') return 'down';
+                return null;
+            };
+
+            const keyDownHandler = (event: KeyboardEvent) => {
+                const dir = toMoveDirection(event);
+                if (!dir) return;
+                const active = document.activeElement as HTMLElement | null;
+                const isEditable = active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' || active?.isContentEditable;
+                if (isEditable) return;
+                this.heldMoveKeys.add(dir);
+                event.preventDefault();
+            };
+            const keyUpHandler = (event: KeyboardEvent) => {
+                const dir = toMoveDirection(event);
+                if (!dir) return;
+                this.heldMoveKeys.delete(dir);
+            };
+            window.addEventListener('keydown', keyDownHandler, { capture: true });
+            window.addEventListener('keyup', keyUpHandler, { capture: true });
+            document.addEventListener('keydown', keyDownHandler, { capture: true });
+            document.addEventListener('keyup', keyUpHandler, { capture: true });
+            window.addEventListener('blur', () => this.heldMoveKeys.clear());
+            this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+                window.removeEventListener('keydown', keyDownHandler, true);
+                window.removeEventListener('keyup', keyUpHandler, true);
+                document.removeEventListener('keydown', keyDownHandler, true);
+                document.removeEventListener('keyup', keyUpHandler, true);
+                this.heldMoveKeys.clear();
+            });
 
             this.connectToServer();
         } catch (e) {
@@ -399,7 +504,9 @@ export class OfficeScene extends Phaser.Scene {
     async connectToServer() {
         try {
             console.log("Connecting to Colyseus...");
-            const client = new Colyseus.Client('ws://localhost:3000');
+            const wsEndpoint = resolveWsEndpoint();
+            this.statusText.setText(`Colyseus Sync: Connecting to ${wsEndpoint}...`).setColor('#ffffaa');
+            const client = new Colyseus.Client(wsEndpoint);
             this.room = await client.joinOrCreate('office');
 
             console.log("Room joined successfully!", this.room.sessionId);
@@ -415,6 +522,23 @@ export class OfficeScene extends Phaser.Scene {
                 // Bind chat bus
                 this.room!.onMessage('chat', (message: any) => {
                     eventBus.dispatchEvent(new CustomEvent('chat-message', { detail: message }));
+                });
+                this.room!.onMessage('highlight-event', (message: any) => {
+                    eventBus.dispatchEvent(new CustomEvent('highlight-event', { detail: message }));
+                    if (this.cinematicMode && message?.agentId) {
+                        this.focusAgentTemporarily(message.agentId);
+                    }
+                });
+                this.room!.onMessage('scenario-event', (message: any) => {
+                    eventBus.dispatchEvent(new CustomEvent('scenario-event', { detail: message }));
+                });
+                this.room!.onMessage('relationship-update', (message: any) => {
+                    eventBus.dispatchEvent(new CustomEvent('relationship-update', { detail: message }));
+                });
+                this.room!.onMessage('layout-sync', (message: any) => {
+                    this.layoutItems = Array.isArray(message?.layout) ? message.layout : [];
+                    this.renderCustomLayout(this.layoutItems);
+                    eventBus.dispatchEvent(new CustomEvent('layout-sync', { detail: { items: this.layoutItems } }));
                 });
 
                 state.agents.onAdd((agent: AgentState, sessionId: string) => {
@@ -542,6 +666,17 @@ export class OfficeScene extends Phaser.Scene {
                                 }
                             }));
                         }
+                        eventBus.dispatchEvent(new CustomEvent('agent-telemetry', {
+                            detail: {
+                                id: sessionId,
+                                name: agent.name,
+                                mood: Number(agent.mood || 0),
+                                reputation: Number(agent.reputation || 0),
+                                riskLevel: Number(agent.riskLevel || 0),
+                                momentum: Number(agent.momentum || 0),
+                                action: agent.action
+                            }
+                        }));
 
                         lastAction = agent.action;
                         prevX = agent.x;
@@ -560,24 +695,129 @@ export class OfficeScene extends Phaser.Scene {
 
         } catch (e) {
             console.error(e);
-            this.statusText.setText('Colyseus Sync: Failed (Check Server)').setColor('#ffaaaa');
+            const wsEndpoint = resolveWsEndpoint();
+            this.statusText.setText(`Colyseus Sync: Failed (${wsEndpoint})`).setColor('#ffaaaa');
         }
     }
 
     update() {
+        if (this.cinematicReleaseAt > 0 && Date.now() > this.cinematicReleaseAt) {
+            this.cinematicReleaseAt = 0;
+            this.followTarget = null;
+        }
+        const speed = 5;
+        const manualPan =
+            this.heldMoveKeys.size > 0 ||
+            Boolean(this.cursors?.left.isDown) ||
+            Boolean(this.cursors?.right.isDown) ||
+            Boolean(this.cursors?.up.isDown) ||
+            Boolean(this.cursors?.down.isDown);
+        if (manualPan) {
+            // User input should always win over cinematic follow.
+            this.followTarget = null;
+            this.cinematicReleaseAt = 0;
+            if (this.cursors?.left.isDown || this.heldMoveKeys.has('left')) this.cameras.main.scrollX -= speed;
+            if (this.cursors?.right.isDown || this.heldMoveKeys.has('right')) this.cameras.main.scrollX += speed;
+            if (this.cursors?.up.isDown || this.heldMoveKeys.has('up')) this.cameras.main.scrollY -= speed;
+            if (this.cursors?.down.isDown || this.heldMoveKeys.has('down')) this.cameras.main.scrollY += speed;
+        }
         // If following an agent, smoothly track them
-        if (this.followTarget) {
+        if (this.followTarget && !manualPan) {
             const cam = this.cameras.main;
             const targetX = this.followTarget.x - cam.width / (2 * cam.zoom);
             const targetY = this.followTarget.y - cam.height / (2 * cam.zoom);
             cam.scrollX += (targetX - cam.scrollX) * 0.08;
             cam.scrollY += (targetY - cam.scrollY) * 0.08;
-        } else {
-            const speed = 5;
-            if (this.cursors?.left.isDown) this.cameras.main.scrollX -= speed;
-            if (this.cursors?.right.isDown) this.cameras.main.scrollX += speed;
-            if (this.cursors?.up.isDown) this.cameras.main.scrollY -= speed;
-            if (this.cursors?.down.isDown) this.cameras.main.scrollY += speed;
+        }
+        const cam = this.cameras.main;
+        const maxScrollX = Math.max(0, this.gridSize - cam.width / cam.zoom);
+        const maxScrollY = Math.max(0, this.gridSize - cam.height / cam.zoom);
+        cam.scrollX = Phaser.Math.Clamp(cam.scrollX, 0, maxScrollX);
+        cam.scrollY = Phaser.Math.Clamp(cam.scrollY, 0, maxScrollY);
+    }
+
+    private focusAgentTemporarily(agentId: string) {
+        const target = this.agentSprites.get(agentId);
+        if (!target) return;
+        this.followTarget = target;
+        this.cinematicReleaseAt = Date.now() + 7000;
+    }
+
+    private renderCustomLayout(items: Array<{ type: string; x: number; y: number; label?: string }>) {
+        if (!this.customLayoutLayer) return;
+        this.customLayoutLayer.removeAll(true);
+        for (let index = 0; index < items.length; index++) {
+            const source = items[index] as { id?: string; type: string; x: number; y: number; label?: string };
+            const item = {
+                ...source,
+                id: source.id || `layout_${index}`
+            };
+            const x = Math.round(item.x) * 16;
+            const y = Math.round(item.y) * 16;
+            const group = this.add.container(x, y);
+            const g = this.add.graphics();
+            switch (item.type) {
+                case 'plant':
+                    g.fillStyle(0x8b4513, 1);
+                    g.fillRect(-5, 0, 10, 8);
+                    g.fillStyle(0x27ae60, 1);
+                    g.fillCircle(0, -5, 6);
+                    g.fillStyle(0x2ecc71, 1);
+                    g.fillCircle(-3, -7, 4);
+                    g.fillCircle(4, -6, 4);
+                    break;
+                case 'desk':
+                    g.fillStyle(0x6d4c2e, 1);
+                    g.fillRect(-12, -8, 24, 16);
+                    g.fillStyle(0x2d3436, 1);
+                    g.fillRect(-8, -6, 10, 6);
+                    break;
+                case 'bookshelf':
+                    g.fillStyle(0x6d4c2e, 1);
+                    g.fillRect(-8, -12, 16, 24);
+                    g.fillStyle(0xfdcb6e, 1);
+                    g.fillRect(-6, -8, 3, 6);
+                    g.fillStyle(0x0984e3, 1);
+                    g.fillRect(-2, -8, 3, 6);
+                    g.fillStyle(0xe17055, 1);
+                    g.fillRect(2, -8, 3, 6);
+                    break;
+                case 'coffee_machine':
+                    g.fillStyle(0x2d3436, 1);
+                    g.fillRect(-6, -8, 12, 16);
+                    g.fillStyle(0xd63031, 1);
+                    g.fillCircle(0, 4, 2);
+                    break;
+                case 'table':
+                    g.fillStyle(0x6d4c2e, 1);
+                    g.fillRect(-10, -6, 20, 12);
+                    break;
+                case 'chair':
+                    g.fillStyle(0x4a4a6a, 1);
+                    g.fillCircle(0, 0, 6);
+                    break;
+                case 'whiteboard':
+                    g.fillStyle(0xdfe6e9, 1);
+                    g.fillRect(-10, -6, 20, 12);
+                    g.lineStyle(1, 0x636e72, 1);
+                    g.strokeRect(-10, -6, 20, 12);
+                    break;
+                default:
+                    g.fillStyle(0xb2bec3, 1);
+                    g.fillRect(-6, -6, 12, 12);
+            }
+            group.add(g);
+            if (item.label) {
+                const label = this.add.text(0, 10, item.label.slice(0, 8), { fontSize: '8px', color: '#dfe6f3' }).setOrigin(0.5, 0);
+                group.add(label);
+            }
+            group.setSize(22, 22);
+            group.setInteractive(new Phaser.Geom.Rectangle(-11, -11, 22, 22), Phaser.Geom.Rectangle.Contains);
+            group.on('pointerdown', () => {
+                if (!this.layoutEditMode) return;
+                this.layoutDragItemId = item.id;
+            });
+            this.customLayoutLayer.add(group);
         }
     }
 }
