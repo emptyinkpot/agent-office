@@ -10,8 +10,7 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "dev": "npm run dev --workspaces --if-present",
-    "start": "sh -c 'npm run start --workspace=@agent-office/server & SERVER_PID=$!; npm run dev --workspace=@agent-office/ui; kill $SERVER_PID'"
+    "dev": "npm run dev --workspaces --if-present"
   },
   "devDependencies": {
     "typescript": "^5.4.2",
